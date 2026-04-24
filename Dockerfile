@@ -1,26 +1,16 @@
 # ================================================================
-# Dockerfile — Banking Lakehouse Application
-# ================================================================
-# Multi-stage build:
-#   Stage 1: Python + Spark + Iceberg jars
-#   Stage 2: Final lean runtime image
-#
-# Usage:
-#   docker build -t lakehouse-app:1.0 .
-#   docker run --rm lakehouse-app:1.0 --mode trino --section counts
-#   docker run --rm lakehouse-app:1.0 --mode kafka --topic finacle-transactions
+# Dockerfile — Banking Lakehouse Application (FIXED)
 # ================================================================
 
 FROM apache/spark:3.5.4-python3
 
 USER root
 
-# ---- Metadata ----
-LABEL maintainer="Data Engineering Team"
-LABEL description="Banking Lakehouse — containerized Kafka consumer + Trino query client"
+LABEL maintainer="Abdullah Shaikh"
+LABEL description="Banking Lakehouse containerized app"
 LABEL version="1.0"
 
-# ---- Environment defaults (override at runtime) ----
+# ---- Environment defaults ----
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     AWS_REGION=us-east-1 \
@@ -39,7 +29,6 @@ ENV PYTHONUNBUFFERED=1 \
     TRINO_HTTP_SCHEME=http
 
 # ---- Download Iceberg / Nessie / Kafka jars at build time ----
-# This avoids runtime downloads — faster startup, works offline
 WORKDIR /opt/spark/jars
 RUN set -eux; \
     for jar in \
@@ -64,40 +53,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 # ---- Copy application code ----
 COPY app/ /app/app/
 
-# ---- Create entrypoint script ----
-# Routes kafka mode → spark-submit, trino mode → python
-RUN cat > /usr/local/bin/entrypoint.sh <<'EOF'
-#!/bin/bash
-set -e
+# ---- ★ FIX: Copy entrypoint from SEPARATE FILE (not heredoc) ----
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 
-# Parse --mode flag to decide execution strategy
-MODE=""
-for arg in "$@"; do
-    if [ "$prev" = "--mode" ]; then
-        MODE="$arg"
-        break
-    fi
-    prev="$arg"
-done
-
-cd /app
-
-if [ "$MODE" = "kafka" ]; then
-    echo "==> Running kafka mode via spark-submit"
-    exec /opt/spark/bin/spark-submit \
-        --conf spark.driver.extraJavaOptions=-Daws.region=${AWS_REGION} \
-        --conf spark.executor.extraJavaOptions=-Daws.region=${AWS_REGION} \
-        -m app.index "$@"
-elif [ "$MODE" = "trino" ]; then
-    echo "==> Running trino mode"
-    exec python -m app.index "$@"
-else
-    echo "==> Dispatching (mode not pre-detected): python -m app.index"
-    exec python -m app.index "$@"
-fi
-EOF
-
-RUN chmod +x /usr/local/bin/entrypoint.sh && \
+# ---- ★ FIX: Strip Windows line endings + make executable + chown ----
+RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh && \
+    chmod +x /usr/local/bin/entrypoint.sh && \
+    chown 185:185 /usr/local/bin/entrypoint.sh && \
     chown -R 185:185 /app
 
 # ---- Run as non-root user (Spark's default UID) ----
