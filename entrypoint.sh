@@ -20,10 +20,12 @@ if [ "$MODE" = "kafka" ]; then
         --conf spark.driver.extraJavaOptions=-Daws.region=${AWS_REGION} \
         --conf spark.executor.extraJavaOptions=-Daws.region=${AWS_REGION} \
         -m app.index "$@"
+
 elif [ "$MODE" = "trino" ]; then
     echo "==> Running trino mode"
-    exec python -m app.index "$@"
+    exec python3 -m app.index "$@"
+
 else
-    echo "==> Default: running python"
-    exec python -m app.index "$@"
+    echo "==> Default: running python3"
+    exec python3 -m app.index "$@"
 fi
