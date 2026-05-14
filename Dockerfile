@@ -21,7 +21,7 @@ ENV PYTHONUNBUFFERED=1 \
     S3_ACCESS_KEY=minioadmin \
     ICEBERG_WAREHOUSE=s3a://lakehouse-warehouse/warehouse \
     NESSIE_URI=http://nessie.lakehouse-catalog.svc:19120/api/v2 \
-    TRINO_HOST=trino.lakehouse-catalog.svc.cluster.local \
+    TRINO_HOST=trino-external.lakehouse-catalog.svc.cluster.local \
     TRINO_PORT=8080 \
     TRINO_USER=admin \
     TRINO_CATALOG=iceberg \
@@ -30,6 +30,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 # ---- Download Iceberg / Nessie / Kafka jars at build time ----
 WORKDIR /opt/spark/jars
+
 RUN set -eux; \
     for jar in \
         "org/apache/iceberg/iceberg-spark-runtime-3.5_2.12/1.7.1/iceberg-spark-runtime-3.5_2.12-1.7.1.jar" \
@@ -47,24 +48,28 @@ RUN set -eux; \
 
 # ---- Install Python dependencies ----
 WORKDIR /app
+
 COPY requirements.txt .
+
 RUN pip install --no-cache-dir -r requirements.txt
 
 # ---- Copy application code ----
 COPY app/ /app/app/
 
-# ---- ★ FIX: Copy entrypoint from SEPARATE FILE (not heredoc) ----
+# ---- Copy entrypoint ----
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 
-# ---- ★ FIX: Strip Windows line endings + make executable + chown ----
+# ---- Fix permissions and line endings ----
 RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh && \
     chmod +x /usr/local/bin/entrypoint.sh && \
     chown 185:185 /usr/local/bin/entrypoint.sh && \
     chown -R 185:185 /app
 
-# ---- Run as non-root user (Spark's default UID) ----
+# ---- Run as Spark non-root user ----
 USER 185
 
-# ---- Entrypoint and default command ----
+# ---- Entrypoint ----
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+
+# ---- Default command ----
 CMD ["--mode", "trino"]
