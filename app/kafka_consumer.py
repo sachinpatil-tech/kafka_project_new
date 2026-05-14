@@ -1,10 +1,23 @@
 """
 ================================================================
- kafka_consumer.py — Kafka → Iceberg (Nessie + MinIO)
+ kafka_consumer.py — Kafka (Debezium CDC) → Iceberg Bronze
 ================================================================
- PySpark Structured Streaming (or batch) reads messages from Kafka,
- parses JSON, writes to Iceberg Bronze tables in MinIO,
- catalog registered with Nessie.
+ PySpark Structured Streaming (or batch) reads CDC messages from
+ Kafka topic 'pgb.public.users' (Debezium envelope), explodes the
+ envelope, and writes to Iceberg Bronze layer in MinIO with
+ Nessie catalog registration.
+
+ Debezium envelope structure:
+   {
+     "before": { "id": 1, "name": "...", "email": "..." } | null,
+     "after":  { "id": 1, "name": "...", "email": "..." } | null,
+     "op":     "c" (create) | "u" (update) | "d" (delete) | "r" (snapshot),
+     "ts_ms":  1715000000000,
+     "source": { "db": "mydb", "schema": "public", "table": "users", ... }
+   }
+
+ Bronze tables:
+   - lakehouse.bronze.users_raw   (full CDC events; append-only history)
 ================================================================
 """
 from datetime import datetime
@@ -17,136 +30,46 @@ log = get_logger("consumer")
 
 
 # ----------------------------------------------------------------
-# SCHEMAS — one per Kafka topic
+# SCHEMAS — Debezium envelope for users
 # ----------------------------------------------------------------
 def _build_schemas():
-    """Build Iceberg schemas lazily (PySpark import happens only here)."""
-    from pyspark.sql.types import StructType, StructField, StringType
+    """Build Iceberg schemas lazily (PySpark import only here)."""
+    from pyspark.sql.types import (
+        StructType, StructField, StringType, LongType, IntegerType
+    )
 
-    SCHEMA_TRANSACTIONS = StructType([
-        StructField("txn_id", StringType()),
-        StructField("account_id", StringType()),
-        StructField("customer_id", StringType()),
-        StructField("txn_type", StringType()),
-        StructField("amount", StringType()),
-        StructField("currency", StringType()),
-        StructField("txn_date", StringType()),
-        StructField("value_date", StringType()),
-        StructField("branch_code", StringType()),
-        StructField("channel", StringType()),
-        StructField("narration", StringType()),
-        StructField("balance_after", StringType()),
-        StructField("status", StringType()),
-        StructField("ref_number", StringType()),
-    ])
-
-    SCHEMA_CUSTOMERS = StructType([
-        StructField("customer_id", StringType()),
-        StructField("name", StringType()),
-        StructField("pan", StringType()),
-        StructField("aadhaar_masked", StringType()),
-        StructField("mobile", StringType()),
+    # Inner row schema — mydb.public.users (id, name, email)
+    USER_ROW = StructType([
+        StructField("id",    IntegerType()),
+        StructField("name",  StringType()),
         StructField("email", StringType()),
-        StructField("dob", StringType()),
-        StructField("gender", StringType()),
-        StructField("kyc_status", StringType()),
-        StructField("kyc_date", StringType()),
-        StructField("risk_category", StringType()),
-        StructField("branch_code", StringType()),
-        StructField("account_type", StringType()),
-        StructField("account_number", StringType()),
-        StructField("account_open_date", StringType()),
-        StructField("occupation", StringType()),
-        StructField("annual_income", StringType()),
-        StructField("address_city", StringType()),
-        StructField("address_state", StringType()),
-        StructField("nominee_name", StringType()),
     ])
 
-    SCHEMA_AML_ALERTS = StructType([
-        StructField("alert_id", StringType()),
-        StructField("customer_id", StringType()),
-        StructField("customer_name", StringType()),
-        StructField("alert_date", StringType()),
-        StructField("alert_type", StringType()),
-        StructField("risk_score", StringType()),
-        StructField("rule_triggered", StringType()),
-        StructField("transaction_ids", StringType()),
-        StructField("total_amount", StringType()),
-        StructField("currency", StringType()),
-        StructField("description", StringType()),
-        StructField("status", StringType()),
-        StructField("assigned_to", StringType()),
-        StructField("priority", StringType()),
-        StructField("due_date", StringType()),
-        StructField("resolution", StringType()),
-        StructField("resolution_date", StringType()),
-        StructField("sar_filed", StringType()),
-        StructField("sar_reference", StringType()),
+    # Debezium "source" block (subset — we keep useful fields only)
+    SOURCE_BLOCK = StructType([
+        StructField("version",  StringType()),
+        StructField("connector",StringType()),
+        StructField("name",     StringType()),
+        StructField("ts_ms",    LongType()),
+        StructField("db",       StringType()),
+        StructField("schema",   StringType()),
+        StructField("table",    StringType()),
+        StructField("lsn",      LongType()),
+        StructField("txId",     LongType()),
     ])
 
-    SCHEMA_CIBIL = StructType([
-        StructField("report_id", StringType()),
-        StructField("customer_id", StringType()),
-        StructField("customer_name", StringType()),
-        StructField("pan", StringType()),
-        StructField("cibil_score", StringType()),
-        StructField("score_date", StringType()),
-        StructField("total_accounts", StringType()),
-        StructField("active_accounts", StringType()),
-        StructField("closed_accounts", StringType()),
-        StructField("overdue_accounts", StringType()),
-        StructField("total_outstanding", StringType()),
-        StructField("secured_outstanding", StringType()),
-        StructField("unsecured_outstanding", StringType()),
-        StructField("credit_utilization_pct", StringType()),
-        StructField("enquiry_count_6m", StringType()),
-        StructField("enquiry_count_12m", StringType()),
-        StructField("dpd_30_count", StringType()),
-        StructField("dpd_60_count", StringType()),
-        StructField("dpd_90_count", StringType()),
-        StructField("written_off_amount", StringType()),
-        StructField("suit_filed_count", StringType()),
-        StructField("wilful_defaulter", StringType()),
-        StructField("report_pull_date", StringType()),
-        StructField("report_source", StringType()),
+    # Full Debezium CDC envelope
+    SCHEMA_USERS_CDC = StructType([
+        StructField("before", USER_ROW),
+        StructField("after",  USER_ROW),
+        StructField("source", SOURCE_BLOCK),
+        StructField("op",     StringType()),
+        StructField("ts_ms",  LongType()),
     ])
 
-    SCHEMA_NPA = StructType([
-        StructField("report_date", StringType()),
-        StructField("loan_id", StringType()),
-        StructField("customer_id", StringType()),
-        StructField("customer_name", StringType()),
-        StructField("loan_type", StringType()),
-        StructField("branch_code", StringType()),
-        StructField("sanctioned_amount", StringType()),
-        StructField("outstanding_principal", StringType()),
-        StructField("outstanding_interest", StringType()),
-        StructField("total_outstanding", StringType()),
-        StructField("dpd", StringType()),
-        StructField("asset_classification", StringType()),
-        StructField("npa_status", StringType()),
-        StructField("npa_date", StringType()),
-        StructField("provision_required_pct", StringType()),
-        StructField("provision_amount", StringType()),
-        StructField("collateral_type", StringType()),
-        StructField("collateral_value", StringType()),
-        StructField("net_npa_exposure", StringType()),
-        StructField("recovery_action", StringType()),
-        StructField("recovery_amount", StringType()),
-        StructField("last_review_date", StringType()),
-        StructField("next_review_date", StringType()),
-        StructField("relationship_manager", StringType()),
-        StructField("remarks", StringType()),
-    ])
-
-    # Topic name → (schema, full iceberg table path)
+    # Topic name → (schema, iceberg target table)
     return {
-        "finacle-transactions": (SCHEMA_TRANSACTIONS, "lakehouse.bronze.finacle_transactions")
-    #     "finacle-customers":    (SCHEMA_CUSTOMERS,    "lakehouse.bronze.finacle_customers"),
-    #     "aml-alerts":           (SCHEMA_AML_ALERTS,   "lakehouse.bronze.aml_alerts"),
-    #     "cibil-bureau":         (SCHEMA_CIBIL,        "lakehouse.bronze.cibil_bureau"),
-    #     "npa-report":           (SCHEMA_NPA,          "lakehouse.bronze.npa_report"),
+        "pgb.public.users": (SCHEMA_USERS_CDC, "lakehouse.bronze.users_raw"),
     }
 
 
@@ -183,7 +106,7 @@ def _create_spark_session():
 
     spark = (
         SparkSession.builder
-        .appName("LakehouseKafkaConsumer")
+        .appName("LakehouseUsersCDCConsumer")
         .config("spark.sql.extensions",
                 "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
         # Iceberg catalog backed by Nessie
@@ -202,7 +125,7 @@ def _create_spark_session():
         .config("spark.sql.catalog.lakehouse.s3.access-key-id",     config.S3_ACCESS_KEY)
         .config("spark.sql.catalog.lakehouse.s3.secret-access-key", config.S3_SECRET_KEY)
         .config("spark.sql.catalog.lakehouse.s3.region",            config.S3_REGION)
-        # Hadoop S3A (fallback)
+        # Hadoop S3A fallback
         .config("spark.hadoop.fs.s3a.endpoint",          config.S3_ENDPOINT)
         .config("spark.hadoop.fs.s3a.access.key",        config.S3_ACCESS_KEY)
         .config("spark.hadoop.fs.s3a.secret.key",        config.S3_SECRET_KEY)
@@ -213,7 +136,6 @@ def _create_spark_session():
         .getOrCreate()
     )
 
-    # Ensure namespaces exist
     spark.sql("CREATE NAMESPACE IF NOT EXISTS lakehouse.bronze")
     spark.sql("CREATE NAMESPACE IF NOT EXISTS lakehouse.silver")
     spark.sql("CREATE NAMESPACE IF NOT EXISTS lakehouse.gold")
@@ -223,11 +145,70 @@ def _create_spark_session():
 
 
 # ----------------------------------------------------------------
+# CDC PARSING HELPER  (envelope → flat bronze row)
+# ----------------------------------------------------------------
+def _parse_cdc(df_raw, schema):
+    """Debezium envelope ko flat bronze schema mein convert karta hai."""
+    from pyspark.sql.functions import (
+        col, from_json, current_timestamp, lit, when, coalesce
+    )
+
+    df = (
+        df_raw
+        .selectExpr(
+            "CAST(key AS STRING)   as kafka_key",
+            "CAST(value AS STRING) as json_value",
+            "topic                  as kafka_topic",
+            "partition              as kafka_partition",
+            "offset                 as kafka_offset",
+            "timestamp              as kafka_timestamp",
+        )
+        # Tombstone messages (delete markers with null value) ko skip karo
+        .filter(col("json_value").isNotNull())
+        .select(
+            "kafka_key", "kafka_topic", "kafka_partition",
+            "kafka_offset", "kafka_timestamp",
+            from_json(col("json_value"), schema).alias("payload"),
+        )
+        .select(
+            col("kafka_key"),
+            col("kafka_topic"),
+            col("kafka_partition"),
+            col("kafka_offset"),
+            col("kafka_timestamp"),
+            col("payload.op").alias("op"),
+            col("payload.ts_ms").alias("source_ts_ms"),
+            col("payload.source.db").alias("source_db"),
+            col("payload.source.schema").alias("source_schema"),
+            col("payload.source.table").alias("source_table"),
+            col("payload.source.lsn").alias("source_lsn"),
+            # `before` block (for u/d)
+            col("payload.before.id").alias("before_id"),
+            col("payload.before.name").alias("before_name"),
+            col("payload.before.email").alias("before_email"),
+            # `after` block (for c/u/r)
+            col("payload.after.id").alias("after_id"),
+            col("payload.after.name").alias("after_name"),
+            col("payload.after.email").alias("after_email"),
+        )
+        # Effective row id — `after.id` for c/u/r, else `before.id` for d
+        .withColumn("id", coalesce(col("after_id"), col("before_id")))
+        .withColumn("op_type", when(col("op") == "c", "INSERT")
+                                .when(col("op") == "u", "UPDATE")
+                                .when(col("op") == "d", "DELETE")
+                                .when(col("op") == "r", "SNAPSHOT")
+                                .otherwise("UNKNOWN"))
+        .withColumn("_ingestion_ts", current_timestamp())
+        .withColumn("_source", lit("debezium-kafka"))
+    )
+    return df
+
+
+# ----------------------------------------------------------------
 # PROCESSING FUNCTIONS
 # ----------------------------------------------------------------
 def _process_batch(spark, kafka_options, topic, schema, iceberg_table) -> int:
-    """One topic ka batch — read all available, write once."""
-    from pyspark.sql.functions import col, from_json, current_timestamp, lit
+    """One topic ka batch — read all available, append to Bronze."""
 
     log.info("Processing: %s → %s", topic, iceberg_table)
 
@@ -246,37 +227,29 @@ def _process_batch(spark, kafka_options, topic, schema, iceberg_table) -> int:
 
     log.info("Found %d messages in Kafka", msg_count)
 
-    df_parsed = (
-        df_raw
-        .selectExpr("CAST(key AS STRING) as kafka_key",
-                    "CAST(value AS STRING) as json_value")
-        .select(
-            col("kafka_key"),
-            from_json(col("json_value"), schema).alias("data")
-        )
-        .select("data.*")
-        .withColumn("_ingestion_ts", current_timestamp())
-        .withColumn("_source", lit("kafka"))
-    )
-
+    df_parsed = _parse_cdc(df_raw, schema)
     row_count = df_parsed.count()
-    log.info("Parsed %d rows", row_count)
+    log.info("Parsed %d CDC events", row_count)
 
-    (
-        df_parsed.writeTo(iceberg_table)
-        .tableProperty("format-version", "2")
-        .createOrReplace()
-    )
+    # APPEND mode — bronze CDC history immutable rakhni hai.
+    # First run me table create karna padega, baad me append.
+    try:
+        df_parsed.writeTo(iceberg_table).append()
+    except Exception as e:
+        log.warning("Append failed (%s) — creating table on first run", e)
+        (df_parsed.writeTo(iceberg_table)
+            .tableProperty("format-version", "2")
+            .tableProperty("write.parquet.compression-codec", "zstd")
+            .createOrReplace())
 
-    log.info("✓ Written %d rows to %s", row_count, iceberg_table)
+    log.info("✓ Wrote %d rows to %s", row_count, iceberg_table)
     return row_count
 
 
 def _process_streaming(spark, kafka_options, topic, schema, iceberg_table,
                        checkpoint_dir: str):
-    """One topic ka continuous stream."""
+    """One topic ka continuous stream — appends Debezium CDC to Bronze."""
     import os
-    from pyspark.sql.functions import col, from_json, current_timestamp, lit
 
     log.info("Starting stream: %s → %s", topic, iceberg_table)
 
@@ -288,26 +261,16 @@ def _process_streaming(spark, kafka_options, topic, schema, iceberg_table,
         .load()
     )
 
-    df_parsed = (
-        df_stream
-        .selectExpr("CAST(key AS STRING) as kafka_key",
-                    "CAST(value AS STRING) as json_value")
-        .select(
-            col("kafka_key"),
-            from_json(col("json_value"), schema).alias("data")
-        )
-        .select("data.*")
-        .withColumn("_ingestion_ts", current_timestamp())
-        .withColumn("_source", lit("kafka"))
-    )
+    df_parsed = _parse_cdc(df_stream, schema)
 
-    checkpoint = os.path.join(checkpoint_dir, topic)
+    checkpoint = os.path.join(checkpoint_dir, topic.replace(".", "_"))
     query = (
         df_parsed.writeStream
         .format("iceberg")
         .outputMode("append")
         .option("checkpointLocation", checkpoint)
         .option("fanout-enabled", "true")
+        .trigger(processingTime="30 seconds")
         .toTable(iceberg_table)
     )
     return query
@@ -320,16 +283,16 @@ def run(mode: str = "batch",
         topic: Optional[str] = None,
         checkpoint_dir: str = "/tmp/kafka-iceberg-checkpoints") -> int:
     """
-    Main entrypoint for kafka → iceberg consumer.
+    Kafka → Iceberg Bronze CDC consumer.
 
     Args:
         mode: "batch" or "streaming"
-        topic: specific topic name (None = all configured topics)
+        topic: specific topic (default: from KAFKA_TOPIC env)
         checkpoint_dir: for streaming mode
     Returns:
         0 on success, non-zero on failure
     """
-    print_section(f"KAFKA CONSUMER — {mode.upper()} MODE")
+    print_section(f"KAFKA CDC CONSUMER — {mode.upper()} MODE")
     log.info("Started at: %s", datetime.now().isoformat())
 
     try:
@@ -339,7 +302,6 @@ def run(mode: str = "batch",
         log.error("Install: pip install pyspark==3.5.4")
         return 1
 
-    # Default topic from env (single topic mode)
     if topic is None and config.KAFKA_TOPIC:
         topic = config.KAFKA_TOPIC
 

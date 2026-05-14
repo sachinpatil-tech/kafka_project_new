@@ -1,0 +1,27 @@
+# ============================================================
+# Silver → Gold aggregation (idempotent createOrReplace)
+# Scheduled daily by Airflow.
+# ============================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gold-users-agg
+  namespace: lakehouse-ingest
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: app
+        image: image-registry.openshift-image-registry.svc:5000/lakehouse-ingest/lakehouse-app:1.1
+        args: ["--mode", "transform", "--layer", "gold"]
+        env:
+          - name: S3_SECRET_KEY
+            valueFrom:
+              secretKeyRef:
+                name: minio-creds
+                key: secret-key
+        resources:
+          requests: { memory: "2Gi", cpu: "1" }
+          limits:   { memory: "4Gi", cpu: "2" }

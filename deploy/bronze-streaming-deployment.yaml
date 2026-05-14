@@ -1,0 +1,59 @@
+# ============================================================
+# Spark Structured Streaming — Kafka CDC → Bronze (long-running)
+# ============================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bronze-users-stream
+  namespace: lakehouse-ingest
+  labels:
+    app: lakehouse
+    layer: bronze
+    pipeline: users
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate           # only one streaming consumer instance
+  selector:
+    matchLabels:
+      app: lakehouse
+      layer: bronze
+      pipeline: users
+  template:
+    metadata:
+      labels:
+        app: lakehouse
+        layer: bronze
+        pipeline: users
+    spec:
+      restartPolicy: Always
+      containers:
+      - name: app
+        image: image-registry.openshift-image-registry.svc:5000/lakehouse-ingest/lakehouse-app:1.1
+        args:
+          - "--mode"
+          - "kafka"
+          - "--topic"
+          - "pgb.public.users"
+          - "--consume-mode"
+          - "streaming"
+          - "--checkpoint-dir"
+          - "s3a://lakehouse-checkpoints/users"
+        env:
+          - name: KAFKA_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: kafka-creds
+                key: password
+          - name: S3_SECRET_KEY
+            valueFrom:
+              secretKeyRef:
+                name: minio-creds
+                key: secret-key
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1"
+          limits:
+            memory: "4Gi"
+            cpu: "2"

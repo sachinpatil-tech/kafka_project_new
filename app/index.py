@@ -2,14 +2,20 @@
 ================================================================
  index.py — CLI entrypoint
 ================================================================
- Routes between kafka consumer and trino client based on --mode.
+ Routes between:
+   --mode kafka       Kafka (Debezium CDC) → Bronze
+   --mode transform   Bronze → Silver → Gold
+   --mode trino       Run Trino analytics on Lakehouse
 
  Usage:
    python -m app.index --mode kafka
-   python -m app.index --mode kafka --topic finacle-transactions
+   python -m app.index --mode kafka --topic pgb.public.users
    python -m app.index --mode kafka --consume-mode streaming
+   python -m app.index --mode transform --layer silver
+   python -m app.index --mode transform --layer gold
+   python -m app.index --mode transform --layer all
    python -m app.index --mode trino
-   python -m app.index --mode trino --section counts
+   python -m app.index --mode trino --section silver
 ================================================================
 """
 import argparse
@@ -24,51 +30,56 @@ log = get_logger("index")
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="lakehouse",
-        description="Banking Lakehouse — Kafka consumer + Trino query client",
+        description="Lakehouse — Debezium CDC → Bronze/Silver/Gold + Trino",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  --mode kafka                                    # Kafka → Iceberg (batch)
-  --mode kafka --topic finacle-transactions       # Specific topic
-  --mode kafka --consume-mode streaming           # Continuous stream
-  --mode trino                                    # All Trino sections
-  --mode trino --section counts                   # One section
-
-Environment variables override all defaults.
-See config.py for the full list.
+  --mode kafka                                     # CDC → Bronze (batch)
+  --mode kafka --topic pgb.public.users            # specific topic
+  --mode kafka --consume-mode streaming            # continuous stream
+  --mode transform --layer silver                  # Bronze → Silver
+  --mode transform --layer gold                    # Silver → Gold
+  --mode transform --layer all                     # both
+  --mode trino                                     # all Trino sections
+  --mode trino --section silver                    # one section
         """
     )
 
-    parser.add_argument("--mode", required=True, choices=["kafka", "trino"],
-                        help="Pipeline mode: 'kafka' (ingest) or 'trino' (query)")
+    parser.add_argument("--mode", required=True,
+                        choices=["kafka", "transform", "trino"],
+                        help="Pipeline mode")
 
-    # Kafka-mode options
+    # Kafka options
     parser.add_argument("--topic", default=None,
-                        help="[kafka] Specific Kafka topic (default: from KAFKA_TOPIC env)")
-    parser.add_argument("--consume-mode", default="batch", choices=["batch", "streaming"],
-                        help="[kafka] batch = read all then stop; streaming = continuous")
-    parser.add_argument("--checkpoint-dir", default="/tmp/kafka-iceberg-checkpoints",
+                        help="[kafka] Specific Kafka topic")
+    parser.add_argument("--consume-mode", default="batch",
+                        choices=["batch", "streaming"],
+                        help="[kafka] batch = read-all-stop; streaming = continuous")
+    parser.add_argument("--checkpoint-dir",
+                        default="/tmp/kafka-iceberg-checkpoints",
                         help="[kafka] Checkpoint dir for streaming")
 
-    # Trino-mode options
-    parser.add_argument("--section", default=None, choices=["counts", "txn", "risk"],
-                        help="[trino] Single section to run (default: all)")
+    # Transform options
+    parser.add_argument("--layer", default="all",
+                        choices=["silver", "gold", "all"],
+                        help="[transform] Which lakehouse layer to build")
 
-    # Global options
+    # Trino options
+    parser.add_argument("--section", default=None,
+                        choices=["counts", "bronze", "silver", "gold"],
+                        help="[trino] Single section to run")
+
     parser.add_argument("--show-config", action="store_true",
                         help="Print resolved configuration and exit")
 
     args = parser.parse_args()
 
-    # Show-config short-circuit
     if args.show_config:
         config.print_config()
         return 0
 
-    # Always show config at startup
     config.print_config()
 
-    # Dispatch
     if args.mode == "kafka":
         from app import kafka_consumer
         return kafka_consumer.run(
@@ -76,6 +87,10 @@ See config.py for the full list.
             topic=args.topic,
             checkpoint_dir=args.checkpoint_dir,
         )
+
+    elif args.mode == "transform":
+        from app import transformations
+        return transformations.run(layer=args.layer)
 
     elif args.mode == "trino":
         from app import trino_client

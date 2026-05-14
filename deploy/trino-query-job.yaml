@@ -1,0 +1,20 @@
+# ============================================================
+# Trino analytics smoke-test job. Use this for daily monitoring.
+# ============================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: trino-users-query
+  namespace: lakehouse-catalog
+spec:
+  backoffLimit: 1
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: app
+        image: image-registry.openshift-image-registry.svc:5000/lakehouse-catalog/lakehouse-app:1.1
+        args: ["--mode", "trino", "--section", "counts"]
+        resources:
+          requests: { memory: "256Mi", cpu: "100m" }
+          limits:   { memory: "512Mi", cpu: "500m" }

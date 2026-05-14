@@ -1,0 +1,32 @@
+# ============================================================
+# One-shot Kafka → Bronze ingestion (batch). Useful for backfill.
+# ============================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: bronze-users-batch
+  namespace: lakehouse-ingest
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: app
+        image: image-registry.openshift-image-registry.svc:5000/lakehouse-ingest/lakehouse-app:1.1
+        args: ["--mode", "kafka", "--topic", "pgb.public.users",
+               "--consume-mode", "batch"]
+        env:
+          - name: KAFKA_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: kafka-creds
+                key: password
+          - name: S3_SECRET_KEY
+            valueFrom:
+              secretKeyRef:
+                name: minio-creds
+                key: secret-key
+        resources:
+          requests: { memory: "2Gi", cpu: "1" }
+          limits:   { memory: "4Gi", cpu: "2" }

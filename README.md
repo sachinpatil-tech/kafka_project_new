@@ -1,75 +1,126 @@
-# Banking Lakehouse — Containerized Pipeline
+# Users CDC Lakehouse — Containerized Pipeline
 
-A modular, containerized Python application that handles both:
+End-to-end CDC pipeline:
 
-1. **Kafka → Iceberg ingestion** (PySpark, Nessie catalog, MinIO storage)
-2. **Trino-based analytics queries** on Bronze layer tables
+```
+PostgreSQL (mydb.public.users)
+   ↓  Debezium logical decoding (pgoutput)
+Kafka topic  pgb.public.users
+   ↓  PySpark Structured Streaming (or batch)
+MinIO  →  Bronze (CDC history) → Silver (current state) → Gold (aggregates)
+   ↓  Iceberg + Nessie catalog
+Trino  →  Metabase
+   ↑  Airflow DAGs orchestrate batch transforms
+```
 
-Designed for deployment on OpenShift / Kubernetes.
+Source rows: `dvdrental.public.actor` (200 rows) → transformed into
+`mydb.public.users` (`id`, `name`, `email`). Debezium publishes every change
+on topic `pgb.public.users`.
+
+Full architecture, validation commands, MinIO layout, testing steps and
+production best practices: see [docs/PIPELINE.md](docs/PIPELINE.md).
 
 ---
 
-## Architecture
+## Project structure
 
 ```
- Kafka ──→ Spark (kafka mode)  ──→  Nessie catalog
-             │                          │
-             ▼                          │
-         MinIO (Parquet)  ◄─────────────┘
-             ▲
-             │
-          Trino  ◄──  Python client (trino mode)
-             ▲
-             │
-          Metabase
-```
-
----
-
-## Project Structure
-
-```
-lakehouse-app/
+dataLat/
 ├── app/
 │   ├── __init__.py
-│   ├── index.py              # CLI entrypoint
-│   ├── config.py             # env-based config
-│   ├── kafka_consumer.py     # Kafka → Iceberg
+│   ├── index.py              # CLI entrypoint (--mode kafka|transform|trino)
+│   ├── config.py             # env-driven configuration
+│   ├── kafka_consumer.py     # Kafka CDC → Bronze (Debezium envelope)
+│   ├── transformations.py    # Bronze → Silver → Gold
 │   ├── trino_client.py       # Trino analytics
-│   └── utils.py              # logging helpers
-├── requirements.txt
+│   └── utils.py
+├── airflow/dags/             # Airflow KubernetesPodOperator DAGs
+│   ├── users_bronze_load.py
+│   ├── users_silver_clean.py
+│   ├── users_gold_agg.py
+│   └── users_lakehouse_pipeline.py
+├── deploy/                   # OpenShift manifests
+│   ├── debezium-postgres-connector.yaml
+│   ├── bronze-streaming-deployment.yaml
+│   ├── bronze-load-job.yaml
+│   ├── silver-clean-job.yaml
+│   ├── gold-agg-job.yaml
+│   ├── trino-query-job.yaml
+│   └── secrets-template.yaml
+├── sql/
+│   ├── 00_source_seed_dvdrental_to_mydb.sql
+│   └── 10_trino_users_queries.sql
+├── docs/PIPELINE.md
 ├── Dockerfile
-├── .dockerignore
+├── entrypoint.sh
+├── requirements.txt
 └── README.md
 ```
 
 ---
 
-## Quick start
-
-### 1. Build the image
+## CLI usage
 
 ```bash
-docker build -t lakehouse-app:1.0 .
+# Bronze: stream Debezium CDC into Iceberg Bronze (real-time)
+python -m app.index --mode kafka --topic pgb.public.users --consume-mode streaming
+
+# Bronze: one-shot batch backfill
+python -m app.index --mode kafka --topic pgb.public.users --consume-mode batch
+
+# Silver: dedup + cleanse Bronze → users_clean
+python -m app.index --mode transform --layer silver
+
+# Gold: aggregates (email-domain, daily change tally)
+python -m app.index --mode transform --layer gold
+
+# Trino analytics on lakehouse
+python -m app.index --mode trino                          # all sections
+python -m app.index --mode trino --section silver         # one section
+python -m app.index --mode trino --section gold
+
+# Print resolved config (no work)
+python -m app.index --mode trino --show-config
 ```
 
-### 2. Run in Trino query mode (lightweight)
+---
+
+## Build & push to OpenShift internal registry
 
 ```bash
-docker run --rm \
-  -e TRINO_HOST=trino.lakehouse-catalog.svc.cluster.local \
-  -e TRINO_PORT=8080 \
-  lakehouse-app:1.0 --mode trino --section counts
+# Build via OpenShift BuildConfig (no local Docker needed)
+oc new-build --strategy docker --binary --name lakehouse-app -n lakehouse-ingest
+oc start-build lakehouse-app --from-dir . -n lakehouse-ingest --follow
 ```
 
-### 3. Run in Kafka ingestion mode
+---
+
+## Deploy the pipeline (in order)
 
 ```bash
-docker run --rm \
-  -e KAFKA_BOOTSTRAP_SERVERS=my-cluster-kafka-bootstrap:9092 \
-  -e KAFKA_PASSWORD='your-secret' \
-  -e S3_SECRET_KEY='your-minio-secret' \
-  lakehouse-app:1.0 --mode kafka --topic finacle-transactions
+# 1. Seed source/target Postgres
+psql -h $PG_HOST -U postgres -f sql/00_source_seed_dvdrental_to_mydb.sql
+
+# 2. Secrets
+oc apply -f deploy/secrets-template.yaml      # edit values first
+
+# 3. Debezium connector → starts publishing to pgb.public.users
+oc apply -f deploy/debezium-postgres-connector.yaml
+
+# 4. Either real-time streaming OR scheduled batch
+oc apply -f deploy/bronze-streaming-deployment.yaml   # real-time
+# OR
+oc apply -f deploy/bronze-load-job.yaml               # batch backfill
+oc apply -f deploy/silver-clean-job.yaml
+oc apply -f deploy/gold-agg-job.yaml
+
+# 5. Airflow DAGs (rsync into scheduler pod)
+oc rsync airflow/dags/ $(oc get pod -n airflow -l component=scheduler \
+    -o name | head -1):/opt/airflow/dags/ -n airflow
+
+# 6. Smoke-test analytics
+oc apply -f deploy/trino-query-job.yaml
+oc logs -f job/trino-users-query -n lakehouse-catalog
 ```
 
 ---
@@ -79,228 +130,62 @@ docker run --rm \
 | Variable                  | Default                                          | Purpose                    |
 |---------------------------|--------------------------------------------------|----------------------------|
 | `KAFKA_BOOTSTRAP_SERVERS` | `my-cluster-kafka-bootstrap...:9092`             | Kafka endpoint             |
-| `KAFKA_TOPIC`             | `finacle-transactions`                           | Default topic              |
+| `KAFKA_TOPIC`             | `pgb.public.users`                               | Debezium CDC topic         |
 | `KAFKA_USERNAME`          | `app-user`                                       | SASL username              |
-| `KAFKA_PASSWORD`          | (change)                                         | SASL password              |
+| `KAFKA_PASSWORD`          | (secret)                                         | SASL password              |
+| `PG_HOST` / `PG_PORT`     | `postgresql...:5432`                             | Postgres endpoint          |
+| `PG_SOURCE_DB`            | `dvdrental`                                      | Source DB                  |
+| `PG_TARGET_DB`            | `mydb`                                           | Target DB                  |
 | `S3_ENDPOINT`             | `http://minio-api...:9000`                       | MinIO endpoint             |
 | `S3_ACCESS_KEY`           | `minioadmin`                                     | MinIO access key           |
-| `S3_SECRET_KEY`           | (change)                                         | MinIO secret key           |
+| `S3_SECRET_KEY`           | (secret)                                         | MinIO secret key           |
 | `NESSIE_URI`              | `http://nessie...:19120/api/v2`                  | Nessie catalog URL         |
 | `NESSIE_REF`              | `main`                                           | Nessie branch              |
 | `ICEBERG_WAREHOUSE`       | `s3a://lakehouse-warehouse/warehouse`            | Iceberg root path          |
-| `TRINO_HOST`              | `trino.lakehouse-catalog.svc.cluster.local`      | Trino coordinator host     |
-| `TRINO_PORT`              | `8080`                                           | Trino port                 |
-| `TRINO_CATALOG`           | `iceberg`                                        | Default Trino catalog      |
-| `TRINO_SCHEMA`            | `bronze`                                         | Default Trino schema       |
+| `TRINO_HOST` / `_PORT`    | `trino...:8080`                                  | Trino coordinator          |
+| `TRINO_CATALOG`           | `iceberg`                                        | Default catalog            |
+| `TRINO_SCHEMA`            | `bronze`                                         | Default schema             |
 
 ---
 
-## CLI usage
-
-Run `--help` to see all options:
+## Quick validation
 
 ```bash
-docker run --rm lakehouse-app:1.0 --help
+# Kafka — does the topic exist & have data?
+oc exec -n lakehouse-ingest my-cluster-kafka-0 -- \
+  bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
+  --topic pgb.public.users --from-beginning --max-messages 3
+
+# Connector — running?
+oc exec -n lakehouse-ingest deploy/debezium-connect-cluster-connect -- \
+  curl -s http://localhost:8083/connectors/pgb-users-connector/status | jq
+
+# Trino — row counts across all layers
+oc apply -f deploy/trino-query-job.yaml
+oc logs -f job/trino-users-query -n lakehouse-catalog
 ```
 
-### Kafka mode options
-
-```
---mode kafka                              # batch mode (default)
---mode kafka --topic <topic>              # specific topic
---mode kafka --consume-mode streaming     # continuous streaming
-```
-
-### Trino mode options
-
-```
---mode trino                              # run all query sections
---mode trino --section counts             # row count discovery
---mode trino --section txn                # transaction analytics
---mode trino --section risk               # AML / NPA / CIBIL
-```
-
-### Utility
-
-```
---show-config                             # print resolved config & exit
-```
-
----
-
-## Build and push to Docker Hub
-
-```bash
-# Build with tag
-docker build -t yourname/lakehouse-app:1.0 .
-
-# Login
-docker login
-
-# Push
-docker push yourname/lakehouse-app:1.0
-```
-
----
-
-## OpenShift deployment
-
-### Push to internal registry (recommended)
-
-```bash
-oc registry login
-
-# Tag for OpenShift internal registry
-docker tag lakehouse-app:1.0 \
-  default-route-openshift-image-registry.apps.YOUR-CLUSTER/lakehouse-catalog/lakehouse-app:1.0
-
-docker push \
-  default-route-openshift-image-registry.apps.YOUR-CLUSTER/lakehouse-catalog/lakehouse-app:1.0
-```
-
-### Or use OpenShift BuildConfig (no local Docker needed)
-
-```bash
-# Create a BuildConfig
-oc new-build \
-  --strategy docker \
-  --binary \
-  --name lakehouse-app \
-  -n lakehouse-catalog
-
-# Build from current directory
-oc start-build lakehouse-app \
-  --from-dir . \
-  -n lakehouse-catalog \
-  --follow
-```
-
-### Deploy as a Job
-
-**trino-job.yaml:**
-
-```yaml
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: lakehouse-query-counts
-  namespace: lakehouse-catalog
-spec:
-  template:
-    spec:
-      restartPolicy: Never
-      containers:
-      - name: app
-        image: image-registry.openshift-image-registry.svc:5000/lakehouse-catalog/lakehouse-app:1.0
-        args: ["--mode", "trino", "--section", "counts"]
-```
-
-**kafka-job.yaml:**
-
-```yaml
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: lakehouse-ingest-transactions
-  namespace: lakehouse-ingest
-spec:
-  template:
-    spec:
-      restartPolicy: Never
-      containers:
-      - name: app
-        image: image-registry.openshift-image-registry.svc:5000/lakehouse-ingest/lakehouse-app:1.0
-        args: ["--mode", "kafka", "--topic", "finacle-transactions"]
-        env:
-          - name: KAFKA_PASSWORD
-            valueFrom:
-              secretKeyRef:
-                name: kafka-creds
-                key: password
-          - name: S3_SECRET_KEY
-            valueFrom:
-              secretKeyRef:
-                name: minio-creds
-                key: secret-key
-        resources:
-          requests:
-            memory: "2Gi"
-            cpu: "1"
-          limits:
-            memory: "4Gi"
-            cpu: "2"
-```
-
-```bash
-oc apply -f trino-job.yaml
-oc logs -f job/lakehouse-query-counts -n lakehouse-catalog
-oc delete job lakehouse-query-counts -n lakehouse-catalog
-```
-
-### Create secrets (one-time)
-
-```bash
-oc create secret generic kafka-creds \
-  --from-literal=password='your-kafka-password' \
-  -n lakehouse-ingest
-
-oc create secret generic minio-creds \
-  --from-literal=secret-key='MyStr0ngP@ssw0rd123' \
-  -n lakehouse-ingest
-```
-
----
-
-## Local development
-
-```bash
-# Install deps locally
-pip install -r requirements.txt
-
-# Run Trino mode
-python -m app.index --mode trino --section counts
-
-# Run Kafka mode (requires spark-submit setup)
-spark-submit \
-  --conf spark.driver.extraJavaOptions=-Daws.region=us-east-1 \
-  --conf spark.executor.extraJavaOptions=-Daws.region=us-east-1 \
-  -m app.index --mode kafka --topic finacle-transactions
-```
+Expected after first full run:
+- Bronze `users_raw`: **200** (initial snapshots, `op=r`)
+- Silver `users_clean`: **200**
+- Gold `users_email_domain`: **1** (`example.com` → 200)
+- Gold `users_daily_changes`: 1 row for today / `SNAPSHOT`
 
 ---
 
 ## Troubleshooting
 
-### Trino mode — "bronze schema not found"
-
-Kafka consumer hasn't registered any tables yet. Run ingestion first:
-
-```bash
-docker run --rm lakehouse-app:1.0 --mode kafka --topic finacle-transactions
-```
-
-### Kafka mode — "Unable to load region"
-
-Make sure `AWS_REGION=us-east-1` is set. The Dockerfile sets it by default but env can override.
-
-### "Connection refused" to Trino
-
-Verify the service is reachable from your pod's namespace:
-
-```bash
-oc exec <your-pod> -- curl -s http://$TRINO_HOST:$TRINO_PORT/v1/info
-```
-
-### Spark consumer crashes — missing jars
-
-The Dockerfile pre-downloads all required jars. If you rebuild and break something, confirm with:
-
-```bash
-docker run --rm --entrypoint ls lakehouse-app:1.0 /opt/spark/jars | grep -iE "iceberg|kafka|nessie"
-```
+| Symptom                                | Likely cause / fix                                                              |
+|----------------------------------------|----------------------------------------------------------------------------------|
+| Topic missing                          | Connector not running. Check `/connectors/.../status`                            |
+| Snapshot stuck                         | `slot.name` already exists. Drop logical replication slot in PG and rerun.       |
+| Bronze empty                           | SASL creds wrong, or `startingOffsets=earliest` not honored — check Spark logs.  |
+| Silver 0 rows but Bronze has rows      | All bronze events had null `email`. Inspect with `SELECT * FROM bronze.users_raw LIMIT 5` |
+| Iceberg `NoSuchTableException`         | `lakehouse.bronze` namespace not created — re-run consumer (it ensures it).      |
+| Trino: "iceberg catalog not found"     | `iceberg.properties` not mounted in Trino configmap.                             |
 
 ---
 
 ## License
 
-Proprietary — Banking internal.
+Proprietary — internal use only.

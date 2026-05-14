@@ -1,0 +1,49 @@
+# ============================================================
+# Debezium PostgreSQL Connector — KafkaConnector CR (Strimzi)
+# Source : mydb.public.users
+# Topic  : pgb.public.users
+# ============================================================
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaConnector
+metadata:
+  name: pgb-users-connector
+  namespace: lakehouse-ingest
+  labels:
+    strimzi.io/cluster: debezium-connect-cluster
+spec:
+  class: io.debezium.connector.postgresql.PostgresConnector
+  tasksMax: 1
+  config:
+    # ---- Source connection ----
+    database.hostname: postgresql.lakehouse-ingest.svc.cluster.local
+    database.port: "5432"
+    database.user: postgres
+    database.password: "${file:/opt/kafka/external-configuration/pg-creds/password.properties:password}"
+    database.dbname: mydb
+    database.server.name: pgb            # → topic prefix
+    plugin.name: pgoutput
+    publication.autocreate.mode: filtered
+    slot.name: pgb_slot_users
+
+    # ---- Filter to one table ----
+    schema.include.list: public
+    table.include.list: public.users
+
+    # ---- Snapshot + topic shape ----
+    snapshot.mode: initial               # full table on first start, then CDC
+    topic.creation.enable: "true"
+    topic.creation.default.replication.factor: "3"
+    topic.creation.default.partitions: "3"
+    topic.creation.default.cleanup.policy: delete
+    topic.creation.default.retention.ms: "604800000"   # 7 days
+
+    # ---- Convert + serialization ----
+    key.converter: org.apache.kafka.connect.json.JsonConverter
+    value.converter: org.apache.kafka.connect.json.JsonConverter
+    key.converter.schemas.enable: "false"
+    value.converter.schemas.enable: "false"
+
+    # ---- Reliability ----
+    heartbeat.interval.ms: "30000"
+    max.batch.size: "2048"
+    poll.interval.ms: "500"

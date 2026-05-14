@@ -1,0 +1,27 @@
+# ============================================================
+# Bronze → Silver transformation (idempotent createOrReplace)
+# Scheduled hourly by Airflow.
+# ============================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: silver-users-clean
+  namespace: lakehouse-ingest
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: app
+        image: image-registry.openshift-image-registry.svc:5000/lakehouse-ingest/lakehouse-app:1.1
+        args: ["--mode", "transform", "--layer", "silver"]
+        env:
+          - name: S3_SECRET_KEY
+            valueFrom:
+              secretKeyRef:
+                name: minio-creds
+                key: secret-key
+        resources:
+          requests: { memory: "2Gi", cpu: "1" }
+          limits:   { memory: "4Gi", cpu: "2" }
