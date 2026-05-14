@@ -16,6 +16,7 @@ ENV PYTHONUNBUFFERED=1 \
     AWS_REGION=us-east-1 \
     KAFKA_BOOTSTRAP_SERVERS=my-cluster-kafka-bootstrap.lakehouse-ingest.svc.cluster.local:9092 \
     KAFKA_TOPIC=pgb.public.users \
+    KAFKA_SECURITY_PROTOCOL=PLAINTEXT \
     KAFKA_USERNAME=app-user \
     S3_ENDPOINT=http://minio-api.lakehouse-data.svc.cluster.local:9000 \
     S3_ACCESS_KEY=minioadmin \

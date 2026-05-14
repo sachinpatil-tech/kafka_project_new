@@ -77,19 +77,22 @@ def _build_schemas():
 # KAFKA AUTH OPTIONS
 # ----------------------------------------------------------------
 def _get_kafka_options() -> dict:
-    """Kafka source options (SASL/SCRAM)."""
-    jaas_config = (
-        f'org.apache.kafka.common.security.scram.ScramLoginModule required '
-        f'username="{config.KAFKA_USERNAME}" password="{config.KAFKA_PASSWORD}";'
-    )
-    return {
+    """Kafka source options. SASL fields only added when actually required."""
+    opts = {
         "kafka.bootstrap.servers": config.KAFKA_BOOTSTRAP_SERVERS,
         "kafka.security.protocol": config.KAFKA_SECURITY_PROTOCOL,
-        "kafka.sasl.mechanism":    config.KAFKA_SASL_MECHANISM,
-        "kafka.sasl.jaas.config":  jaas_config,
         "startingOffsets":         "earliest",
         "failOnDataLoss":          "false",
     }
+    # PLAINTEXT / SSL ke liye SASL options skip karo (warna broker handshake fail karta hai)
+    if config.KAFKA_SECURITY_PROTOCOL.startswith("SASL"):
+        jaas_config = (
+            f'org.apache.kafka.common.security.scram.ScramLoginModule required '
+            f'username="{config.KAFKA_USERNAME}" password="{config.KAFKA_PASSWORD}";'
+        )
+        opts["kafka.sasl.mechanism"]   = config.KAFKA_SASL_MECHANISM
+        opts["kafka.sasl.jaas.config"] = jaas_config
+    return opts
 
 
 # ----------------------------------------------------------------

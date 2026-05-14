@@ -22,10 +22,12 @@ KAFKA_BOOTSTRAP_SERVERS = os.environ.get(
 )
 # Debezium ka default topic naming: <server.name>.<schema>.<table>
 KAFKA_TOPIC             = os.environ.get("KAFKA_TOPIC", "pgb.public.users")
-KAFKA_SECURITY_PROTOCOL = os.environ.get("KAFKA_SECURITY_PROTOCOL", "SASL_PLAINTEXT")
+# Broker listener on :9092 is plain PLAINTEXT (no auth). For SASL listener,
+# set KAFKA_SECURITY_PROTOCOL=SASL_PLAINTEXT and provide creds.
+KAFKA_SECURITY_PROTOCOL = os.environ.get("KAFKA_SECURITY_PROTOCOL", "PLAINTEXT")
 KAFKA_SASL_MECHANISM    = os.environ.get("KAFKA_SASL_MECHANISM", "SCRAM-SHA-512")
 KAFKA_USERNAME          = os.environ.get("KAFKA_USERNAME", "app-user")
-KAFKA_PASSWORD          = os.environ.get("KAFKA_PASSWORD", "bwDqbYGrgC2AKOMuthoUu7Ckkj8tNjtB")
+KAFKA_PASSWORD          = os.environ.get("KAFKA_PASSWORD", "")
 
 
 # ----------------------------------------------------------------
