@@ -46,7 +46,7 @@ Examples:
     )
 
     parser.add_argument("--mode", required=True,
-                        choices=["kafka", "transform", "trino"],
+                        choices=["kafka", "transform", "trino", "probe"],
                         help="Pipeline mode")
 
     # Kafka options
@@ -95,6 +95,10 @@ Examples:
     elif args.mode == "trino":
         from app import trino_client
         return trino_client.run(section=args.section)
+
+    elif args.mode == "probe":
+        from app import probe
+        return probe.run()
 
     else:
         log.error("Unknown mode: %s", args.mode)

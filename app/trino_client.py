@@ -234,6 +234,27 @@ _SECTIONS = {
 }
 
 
+def _preflight_dns_check() -> bool:
+    """
+    Trino host resolve hota hai ya nahi check karo before connection.
+    Agar fail, full probe chalao taki user ko alternatives dikhe.
+    """
+    import socket
+    try:
+        ip = socket.gethostbyname(config.TRINO_HOST)
+        log.info("DNS OK: %s → %s", config.TRINO_HOST, ip)
+        return True
+    except Exception as e:
+        log.error("DNS FAIL: %s → %s", config.TRINO_HOST, e)
+        log.error("Running diagnostic probe to find reachable services...")
+        try:
+            from app import probe
+            probe.run()
+        except Exception as pe:
+            log.error("Probe also failed: %s", pe)
+        return False
+
+
 def run(section: Optional[str] = None) -> int:
     """
     Run Trino analytics queries.
@@ -245,6 +266,12 @@ def run(section: Optional[str] = None) -> int:
     """
     print_section("TRINO LAKEHOUSE CLIENT — users pipeline")
     log.info("Started at: %s", datetime.now().isoformat())
+
+    if not _preflight_dns_check():
+        log.error("Aborting — TRINO_HOST is not resolvable from this pod.")
+        log.error("Fix: set env var TRINO_HOST=<correct-host> in the Job spec,")
+        log.error("or update the default in app/config.py.")
+        return 3
 
     try:
         with _connect() as conn:
