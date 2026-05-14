@@ -72,4 +72,4 @@ USER 185
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 # ---- Default command ----
-CMD ["--mode", "trino"]
+CMD ["--mode", "all"]

@@ -14,18 +14,20 @@ done
 
 cd /app
 
-if [ "$MODE" = "kafka" ] || [ "$MODE" = "transform" ]; then
-    echo "==> Running ${MODE} mode via spark-submit"
-    exec /opt/spark/bin/spark-submit \
-        --conf spark.driver.extraJavaOptions=-Daws.region=${AWS_REGION} \
-        --conf spark.executor.extraJavaOptions=-Daws.region=${AWS_REGION} \
-        -m app.index "$@"
-
-elif [ "$MODE" = "trino" ]; then
-    echo "==> Running trino mode"
-    exec python3 -m app.index "$@"
-
-else
-    echo "==> Default: running python3"
-    exec python3 -m app.index "$@"
-fi
+case "$MODE" in
+    kafka|transform|all)
+        echo "==> Running ${MODE} mode via spark-submit"
+        exec /opt/spark/bin/spark-submit \
+            --conf spark.driver.extraJavaOptions=-Daws.region=${AWS_REGION} \
+            --conf spark.executor.extraJavaOptions=-Daws.region=${AWS_REGION} \
+            -m app.index "$@"
+        ;;
+    trino|probe)
+        echo "==> Running ${MODE} mode"
+        exec python3 -m app.index "$@"
+        ;;
+    *)
+        echo "==> Default: running python3"
+        exec python3 -m app.index "$@"
+        ;;
+esac

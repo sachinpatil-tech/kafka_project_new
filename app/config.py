@@ -74,7 +74,7 @@ NESSIE_REF        = os.environ.get("NESSIE_REF", "main")
 # ----------------------------------------------------------------
 TRINO_HOST        = os.environ.get(
     "TRINO_HOST",
-    "trino.lakehouse-catalog.svc.cluster.local"
+    "trino-external.lakehouse-catalog.svc.cluster.local"
 )
 TRINO_PORT        = int(os.environ.get("TRINO_PORT", "8080"))
 TRINO_USER        = os.environ.get("TRINO_USER", "admin")
