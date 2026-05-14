@@ -105,7 +105,11 @@ def build_silver(spark) -> int:
             id,
             TRIM(name)                            AS name,
             LOWER(TRIM(email))                    AS email,
-            LOWER(SPLIT(TRIM(email), '@')[1])     AS email_domain,
+            CASE
+                WHEN email IS NOT NULL AND email LIKE '%@%'
+                THEN LOWER(SPLIT(TRIM(email), '@')[1])
+                ELSE NULL
+            END                                   AS email_domain,
             source_ts_ms,
             CAST(source_ts_ms / 1000 AS TIMESTAMP) AS source_ts,
             _ingestion_ts                         AS bronze_ingested_at,
@@ -113,8 +117,6 @@ def build_silver(spark) -> int:
         FROM ranked
         WHERE rn = 1
           AND op_type <> 'DELETE'        -- deleted rows ko silver mein nahi rakhna
-          AND email IS NOT NULL
-          AND email LIKE '%@%'           -- basic email sanity
     """)
 
     row_count = silver_df.count()
