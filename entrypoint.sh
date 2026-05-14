@@ -13,6 +13,7 @@ for arg in "$@"; do
 done
 
 cd /app
+export PYTHONPATH=/app:${PYTHONPATH}
 
 case "$MODE" in
     kafka|transform|all)
@@ -20,7 +21,7 @@ case "$MODE" in
         exec /opt/spark/bin/spark-submit \
             --conf spark.driver.extraJavaOptions=-Daws.region=${AWS_REGION} \
             --conf spark.executor.extraJavaOptions=-Daws.region=${AWS_REGION} \
-            -m app.index "$@"
+            /app/main.py "$@"
         ;;
     trino|probe)
         echo "==> Running ${MODE} mode"

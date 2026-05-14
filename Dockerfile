@@ -55,6 +55,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # ---- Copy application code ----
 COPY app/ /app/app/
+COPY main.py /app/main.py
 
 # ---- Copy entrypoint ----
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
