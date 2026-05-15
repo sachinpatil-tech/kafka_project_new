@@ -147,6 +147,8 @@ def _bootstrap_tables(spark):
         )
     """)
 
+    # Schema matches what transformations.py (batch) creates so a previously
+    # populated table is compatible — no manual migration needed.
     spark.sql(f"""
         CREATE TABLE IF NOT EXISTS {SILVER_USERS} (
             id                  INT,
@@ -155,7 +157,8 @@ def _bootstrap_tables(spark):
             email_domain        STRING,
             source_ts_ms        BIGINT,
             source_ts           TIMESTAMP,
-            silver_updated_at   TIMESTAMP
+            bronze_ingested_at  TIMESTAMP,
+            silver_built_at     TIMESTAMP
         ) USING iceberg
         TBLPROPERTIES (
             'format-version' = '2',
@@ -196,8 +199,10 @@ def _process_micro_batch(batch_df, batch_id):
     Order: Bronze append → Silver MERGE → Gold rebuild.
     Re-running same batch is safe (idempotent).
     """
-    from pyspark.sql import SparkSession
-    spark = SparkSession.getActiveSession()
+    # Use the SparkSession attached to batch_df — inside foreachBatch this is
+    # the "wrapped" session used by the micro-batch. Temp views and SQL must
+    # share this session.
+    spark = batch_df.sparkSession
 
     count = batch_df.count()
     if count == 0:
@@ -232,6 +237,7 @@ def _process_micro_batch(batch_df, batch_id):
                         END                                              AS email_domain,
                         source_ts_ms,
                         CAST(source_ts_ms / 1000 AS TIMESTAMP)           AS source_ts,
+                        _ingestion_ts                                    AS bronze_ingested_at,
                         op_type,
                         ROW_NUMBER() OVER (
                             PARTITION BY id
@@ -248,17 +254,20 @@ def _process_micro_batch(batch_df, batch_id):
                 THEN DELETE
             WHEN MATCHED AND s.source_ts_ms >= COALESCE(t.source_ts_ms, 0)
                 THEN UPDATE SET
-                    name              = s.name,
-                    email             = s.email,
-                    email_domain      = s.email_domain,
-                    source_ts_ms      = s.source_ts_ms,
-                    source_ts         = s.source_ts,
-                    silver_updated_at = current_timestamp()
+                    name               = s.name,
+                    email              = s.email,
+                    email_domain       = s.email_domain,
+                    source_ts_ms       = s.source_ts_ms,
+                    source_ts          = s.source_ts,
+                    bronze_ingested_at = s.bronze_ingested_at,
+                    silver_built_at    = current_timestamp()
             WHEN NOT MATCHED AND s.op_type <> 'DELETE'
                 THEN INSERT (id, name, email, email_domain,
-                             source_ts_ms, source_ts, silver_updated_at)
+                             source_ts_ms, source_ts,
+                             bronze_ingested_at, silver_built_at)
                 VALUES (s.id, s.name, s.email, s.email_domain,
-                        s.source_ts_ms, s.source_ts, current_timestamp())
+                        s.source_ts_ms, s.source_ts,
+                        s.bronze_ingested_at, current_timestamp())
         """)
         log.info("Batch %s: ✓ Silver MERGE done (%.2fs)",
                  batch_id, time.time() - t0)
