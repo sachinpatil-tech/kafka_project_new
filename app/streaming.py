@@ -74,13 +74,23 @@ def _create_spark_session():
         .config("spark.sql.catalog.lakehouse.s3.access-key-id",     config.S3_ACCESS_KEY)
         .config("spark.sql.catalog.lakehouse.s3.secret-access-key", config.S3_SECRET_KEY)
         .config("spark.sql.catalog.lakehouse.s3.region",            config.S3_REGION)
-        # Hadoop S3A fallback (used by checkpoint location)
+        # Hadoop S3A — used by streaming checkpoint location
         .config("spark.hadoop.fs.s3a.endpoint",          config.S3_ENDPOINT)
         .config("spark.hadoop.fs.s3a.access.key",        config.S3_ACCESS_KEY)
         .config("spark.hadoop.fs.s3a.secret.key",        config.S3_SECRET_KEY)
         .config("spark.hadoop.fs.s3a.path.style.access", "true")
         .config("spark.hadoop.fs.s3a.impl",
                 "org.apache.hadoop.fs.s3a.S3AFileSystem")
+        # ★ Force FileSystem-based checkpoint manager — avoids the missing
+        #   org.apache.hadoop.fs.s3a.S3A (AbstractFileSystem) class that
+        #   FileContext API would otherwise need.
+        .config("spark.sql.streaming.checkpointFileManagerClass",
+                "org.apache.spark.sql.execution.streaming."
+                "FileSystemBasedCheckpointFileManager")
+        # AbstractFileSystem mapping (also provided in case FileContext is used
+        # elsewhere). Both jars ship S3A; this just makes the mapping explicit.
+        .config("spark.hadoop.fs.AbstractFileSystem.s3a.impl",
+                "org.apache.hadoop.fs.s3a.S3A")
         .config("spark.sql.defaultCatalog", "lakehouse")
         # Streaming-friendly settings
         .config("spark.sql.shuffle.partitions", "4")        # small workload
