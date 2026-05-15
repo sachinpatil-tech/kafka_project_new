@@ -46,7 +46,8 @@ Examples:
     )
 
     parser.add_argument("--mode", required=True,
-                        choices=["kafka", "transform", "trino", "probe", "all"],
+                        choices=["kafka", "transform", "trino", "probe",
+                                 "all", "streaming"],
                         help="Pipeline mode")
 
     # Kafka options
@@ -103,6 +104,10 @@ Examples:
     elif args.mode == "all":
         from app import pipeline
         return pipeline.run(topic=args.topic)
+
+    elif args.mode == "streaming":
+        from app import streaming
+        return streaming.run()
 
     else:
         log.error("Unknown mode: %s", args.mode)

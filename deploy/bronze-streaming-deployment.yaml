@@ -1,55 +1,57 @@
 # ============================================================
-# Spark Structured Streaming — Kafka CDC → Bronze (long-running)
+# Long-running Spark Structured Streaming
+# Kafka pgb.public.users → Bronze + Silver + Gold (Iceberg)
+# ============================================================
+# Use Deployment (NOT Job) for streaming workloads:
+#   - never-exit semantics → Job would mark as failed
+#   - Deployment restarts pod automatically on crash
+#   - Rolling updates handle code changes
 # ============================================================
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: bronze-users-stream
+  name: users-cdc-streaming
   namespace: lakehouse-ingest
   labels:
     app: lakehouse
-    layer: bronze
+    component: streaming
     pipeline: users
 spec:
-  replicas: 1
+  replicas: 1                        # Exactly-once requires single writer
   strategy:
-    type: Recreate           # only one streaming consumer instance
+    type: Recreate                   # stop old before starting new (checkpoint contention)
   selector:
     matchLabels:
       app: lakehouse
-      layer: bronze
+      component: streaming
       pipeline: users
   template:
     metadata:
       labels:
         app: lakehouse
-        layer: bronze
+        component: streaming
         pipeline: users
+      annotations:
+        # Trigger pod restart whenever code commit changes (optional CI hook)
+        kubectl.kubernetes.io/restartedAt: ""
     spec:
       restartPolicy: Always
+      terminationGracePeriodSeconds: 60   # let Spark drain current micro-batch
       containers:
-      - name: app
-        image: image-registry.openshift-image-registry.svc:5000/lakehouse-ingest/lakehouse-app:1.1
-        args:
-          - "--mode"
-          - "kafka"
-          - "--topic"
-          - "pgb.public.users"
-          - "--consume-mode"
-          - "streaming"
-          - "--checkpoint-dir"
-          - "s3a://lakehouse-checkpoints/users"
+      - name: streaming
+        image: image-registry.openshift-image-registry.svc:5000/lakehouse-ingest/lakehouse-app:latest
+        imagePullPolicy: Always
+        args: ["--mode", "streaming"]
         env:
-          - name: KAFKA_PASSWORD
-            valueFrom:
-              secretKeyRef:
-                name: kafka-creds
-                key: password
-          - name: S3_SECRET_KEY
-            valueFrom:
-              secretKeyRef:
-                name: minio-creds
-                key: secret-key
+          - name: STREAMING_TRIGGER_SECONDS
+            value: "30"                     # micro-batch every 30s
+          - name: STREAMING_CHECKPOINT
+            value: "s3a://lakehouse-warehouse/checkpoints/users-streaming"
+          - name: STREAMING_QUERY_NAME
+            value: "users-cdc-streaming"
+        ports:
+          - name: spark-ui
+            containerPort: 4040
         resources:
           requests:
             memory: "2Gi"
@@ -57,3 +59,38 @@ spec:
           limits:
             memory: "4Gi"
             cpu: "2"
+        # Liveness: Spark driver UI must respond
+        livenessProbe:
+          httpGet:
+            path: /
+            port: spark-ui
+          initialDelaySeconds: 90           # Spark takes 60-90s to boot
+          periodSeconds: 30
+          failureThreshold: 5
+        # Readiness: streaming query must be active
+        readinessProbe:
+          httpGet:
+            path: /
+            port: spark-ui
+          initialDelaySeconds: 120
+          periodSeconds: 15
+---
+# Optional: expose Spark UI for debugging
+apiVersion: v1
+kind: Service
+metadata:
+  name: users-cdc-streaming-ui
+  namespace: lakehouse-ingest
+  labels:
+    app: lakehouse
+    component: streaming
+spec:
+  type: ClusterIP
+  ports:
+    - name: spark-ui
+      port: 4040
+      targetPort: 4040
+  selector:
+    app: lakehouse
+    component: streaming
+    pipeline: users

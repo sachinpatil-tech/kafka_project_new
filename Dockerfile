@@ -74,4 +74,4 @@ USER 185
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 # ---- Default command ----
-CMD ["--mode", "all"]
+CMD ["--mode", "streaming"]
