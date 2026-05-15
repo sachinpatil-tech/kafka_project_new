@@ -353,31 +353,55 @@ def run() -> int:
     log.info("  Spark UI:        http://localhost:4040")
     log.info("=" * 72)
 
-    # Periodic progress logger (separate thread via .lastProgress polling)
-    try:
+    # Progress logger runs in a daemon thread so it can't block shutdown.
+    import threading
+
+    def _progress_logger():
         while query.isActive:
             time.sleep(60)
             lp = query.lastProgress
             if lp:
                 log.info(
                     "Progress: batch=%s, input_rows=%s, processed_rows/sec=%.1f, "
-                    "duration_ms=%s, sources=%s",
+                    "duration_ms=%s",
                     lp.get("batchId"),
                     lp.get("numInputRows"),
                     lp.get("processedRowsPerSecond") or 0.0,
                     lp.get("durationMs", {}).get("triggerExecution"),
-                    [s.get("description", "")[:60] for s in lp.get("sources", [])],
                 )
-    except KeyboardInterrupt:
-        log.info("Interrupted — stopping streaming query gracefully")
-        query.stop()
-    except Exception as e:
-        log.exception("Streaming loop crashed: %s", e)
-        query.stop()
-        spark.stop()
-        return 2
-    finally:
-        log.info("Streaming terminated")
-        spark.stop()
 
-    return 0
+    threading.Thread(target=_progress_logger, daemon=True).start()
+
+    # Block on awaitTermination — this PROPAGATES any query errors as
+    # exceptions, instead of silently letting isActive flip to False.
+    try:
+        query.awaitTermination()
+        # If we reach here the query terminated cleanly (no exception).
+        # For an unbounded Kafka source this only happens via .stop(),
+        # so it's not really expected in production.
+        log.warning("Streaming query terminated cleanly (no error)")
+        return 0
+    except KeyboardInterrupt:
+        log.info("Interrupted — stopping query gracefully")
+        query.stop()
+        return 0
+    except Exception as e:
+        log.error("=" * 72)
+        log.error("STREAMING QUERY FAILED — driver will exit with non-zero")
+        log.error("=" * 72)
+        log.exception("Top-level exception: %s", e)
+        # Also dump the underlying query exception if any
+        try:
+            qe = query.exception()
+            if qe is not None:
+                log.error("query.exception(): %s", qe)
+        except Exception:
+            pass
+        return 1
+    finally:
+        try:
+            query.stop()
+        except Exception:
+            pass
+        spark.stop()
+        log.info("Streaming driver shut down")
